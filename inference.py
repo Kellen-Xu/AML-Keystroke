@@ -6,7 +6,7 @@ import numpy as np
 TERMINATE_SIGNAL = "stop"
 VALID_PRESS_THRESHOLD = 100
 NUM_PASSWORD = 6
-
+NUM_KEYS = 4
 def parse_line(line):
     line = line.decode().strip()
 
@@ -40,16 +40,24 @@ def is_valid_sample(X):
 model = FakeModel()
 
 com = get_serial_com()
+channels = [[], [], [], []]
 X = []
 valid_X = []
 while True:
     line = com.readline()
     if is_stop_sign(line):
+        # convert channels in to X
+        min_len = min([len(x) for x in channels])
+        for i in range(NUM_KEYS):
+            channels[i] = channels[i][:min_len]
+        X = np.array(channels).T
+        
+        # validate X
         ret, fisrt_flip, last_flip  = is_valid_sample(X)
         if not ret:
             com_send_string(com, "invalid signal")
         else:
-            valid_X.append(X[fisrt_flip:last_flip+1])
+            valid_X = X[fisrt_flip:last_flip+1]
             # inference with model
             pred = model.predict(valid_X)
             if pred:
@@ -57,9 +65,16 @@ while True:
             else:
                 com_send_string(com, "fail")
         # reset buffer
-        X.clear()
-        valid_X.clear()
+        channels.clear()
     else:
-        import pdb
-        pdb.set_trace()
+        # process data
+        try:
+            segs = [int(x) for x in line.split(' ') if x != '']
+        except:
+            continue
+        if len(segs) != 2:
+            continue
+        if segs[0] > 3:
+            continue
+        channels[segs[0]].append(segs[1])
 
