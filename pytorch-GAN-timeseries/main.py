@@ -13,6 +13,7 @@ from utils import time_series_to_plot
 from tensorboardX import SummaryWriter
 from models.recurrent_models import LSTMGenerator, LSTMDiscriminator
 from models.convolutional_models import CausalConvGenerator, CausalConvDiscriminator
+from models.eniac import ENIACGenerator
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default="eniac", help='dataset to use (only btp for now)')
@@ -30,13 +31,13 @@ parser.add_argument('--imf', default='images', help='folder to save images')
 parser.add_argument('--manualSeed', type=int, help='manual seed')
 parser.add_argument('--logdir', default='log', help='logdir for tensorboard')
 parser.add_argument('--run_tag', default='', help='tags for the current run')
-parser.add_argument('--checkpoint_every', default=5, help='number of epochs after which saving checkpoints') 
-parser.add_argument('--tensorboard_image_every', default=5, help='interval for displaying images on tensorboard') 
+parser.add_argument('--checkpoint_every', default=10, help='number of epochs after which saving checkpoints') 
+parser.add_argument('--tensorboard_image_every', default=1, help='interval for displaying images on tensorboard') 
 parser.add_argument('--delta_condition', action='store_true', help='whether to use the mse loss for deltas')
 parser.add_argument('--delta_lambda', type=int, default=10, help='weight for the delta condition')
 parser.add_argument('--alternate', action='store_true', help='whether to alternate between adversarial and mse loss in generator')
 parser.add_argument('--dis_type', default='cnn', choices=['cnn','lstm'], help='architecture to be used for discriminator to use')
-parser.add_argument('--gen_type', default='lstm', choices=['cnn','lstm'], help='architecture to be used for generator to use')
+parser.add_argument('--gen_type', default='eniac', choices=['cnn','lstm','eniac'], help='architecture to be used for generator to use')
 opt = parser.parse_args()
 
 #Create writer for tensorboard
@@ -88,14 +89,16 @@ in_dim = opt.nz + 1 if opt.delta_condition else opt.nz
 if opt.dis_type == "lstm": 
     netD = LSTMDiscriminator(in_dim=1, hidden_dim=256).to(device)
 if opt.dis_type == "cnn":
-    netD = CausalConvDiscriminator(input_size=1, n_layers=8, n_channel=10, kernel_size=8, dropout=0).to(device)
+    netD = CausalConvDiscriminator(input_size=1, n_layers=8, n_channel=10, kernel_size=5, dropout=0).to(device)
 if opt.gen_type == "lstm":
     # netG = LSTMGenerator(in_dim=in_dim, out_dim=1, hidden_dim=256).to(device)
     netG = LSTMGenerator(in_dim=in_dim, out_dim=1, hidden_dim=32).to(device)
 if opt.gen_type == "cnn":
     netG = CausalConvGenerator(noise_size=in_dim, output_size=1, n_layers=8, n_channel=10, kernel_size=8, dropout=0.2).to(device)
     # netG = CausalConvGenerator(noise_size=in_dim, output_size=1, n_layers=6, n_channel=5, kernel_size=8, dropout=0.1).to(device)
-    
+if opt.gen_type == "eniac":
+    netG = ENIACGenerator(in_dim)
+
 assert netG
 assert netD
 
@@ -111,7 +114,7 @@ criterion = nn.BCELoss().to(device)
 delta_criterion = nn.MSELoss().to(device)
 
 #Generate fixed noise to be used for visualization
-fixed_noise = torch.randn(opt.batchSize, 16, nz, device=device)
+fixed_noise = torch.randn(16, 150, nz, device=device)
 
 if opt.delta_condition:
     #Sample both deltas and noise for visualization
@@ -123,8 +126,8 @@ fake_label = 0
 
 # setup optimizer
 # optimizerD = optim.Adam(netD.parameters(), lr=opt.lr)
-optimizerD = optim.Adam(netD.parameters(), lr=0.0002)
-optimizerG = optim.Adam(netG.parameters(), lr=0.0004)
+optimizerD = optim.Adam(netD.parameters(), lr=0.001)
+optimizerG = optim.Adam(netG.parameters(), lr=0.001)
 
 for epoch in range(opt.epochs):
     for i, data in enumerate(dataloader, 0):
@@ -152,19 +155,18 @@ for epoch in range(opt.epochs):
         D_x = output.mean().item()
         
         #Train with fake data
-        noise = torch.randn(batch_size, seq_len, nz, device=device)
+        noise = torch.randn(batch_size * 10, seq_len, nz, device=device)
+        f_label = torch.full((batch_size * 10, seq_len, 1), fake_label, device=device).float()
         if opt.delta_condition:
             #Sample a delta for each batch and concatenate to the noise for each timestep
             deltas = dataset.sample_deltas(batch_size).unsqueeze(2).repeat(1, seq_len, 1)
             noise = torch.cat((noise, deltas), dim=2)
         fake = netG(noise)
-        label.fill_(fake_label)
         output = netD(fake.detach())
-        errD_fake = criterion(output, label)
+        errD_fake = criterion(output, f_label)
         errD_fake.backward()
         D_G_z1 = output.mean().item()
         errD = errD_real + errD_fake
-        optimizerD.step()
         
         #Visualize discriminator gradients
         for name, param in netD.named_parameters():
@@ -174,12 +176,14 @@ for epoch in range(opt.epochs):
         # (2) Update G network: maximize log(D(G(z)))
         ###########################
         netG.zero_grad()
-        label.fill_(real_label) 
         output = netD(fake)
-        errG = criterion(output, label)
+        f_label.fill_(real_label)
+        errG = criterion(output, f_label)
         errG.backward()
         D_G_z2 = output.mean().item()
         
+        if D_x <= 0.95 or D_G_z1 > 0.8:
+            optimizerD.step()
 
         if opt.delta_condition:
             #If option is passed, alternate between the losses instead of using their sum
@@ -193,7 +197,7 @@ for epoch in range(opt.epochs):
             out_seqs = netG(noise)
             delta_loss = opt.delta_lambda * delta_criterion(out_seqs[:, -1] - out_seqs[:, 0], deltas[:,0])
             delta_loss.backward()
-        
+        # if D_x > 0.80:
         optimizerG.step()
         
         #Visualize generator gradients
@@ -225,7 +229,8 @@ for epoch in range(opt.epochs):
     fake = netG(fixed_noise)
     fake_plot = time_series_to_plot(dataset.denormalize(fake))
     fake_plot = fake_plot.float() / 255.
-    torchvision.utils.save_image(fake_plot, os.path.join(opt.imf, opt.run_tag+'_epoch'+str(epoch)+'.jpg'))
+    if (epoch % opt.tensorboard_image_every == 0) or (epoch == (opt.epochs - 1)):
+        torchvision.utils.save_image(fake_plot, os.path.join(opt.imf, opt.run_tag+'_epoch'+str(epoch)+'.jpg'))
     if (epoch % opt.tensorboard_image_every == 0) or (epoch == (opt.epochs - 1)):
         writer.add_image("Fake", fake_plot, epoch)
                              

@@ -63,6 +63,7 @@ class LSTMDiscriminator(nn.Module):
         outputs = self.linear(recurrent_features.contiguous().view(batch_size*seq_len, self.hidden_dim))
         outputs = outputs.view(batch_size, seq_len, 1)
         return outputs
+    
 
 
 if __name__ == "__main__":
@@ -80,3 +81,5 @@ if __name__ == "__main__":
     print("Noise: ", noise.size())
     print("Generator output: ", gen_out.size())
     print("Discriminator output: ", dis_out.size())
+
+
